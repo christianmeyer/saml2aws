@@ -787,22 +787,19 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		return samlAssertion, fmt.Errorf("unable to locate SAMLRequest URL")
 	}
 
-	req, err := http.NewRequest("GET", SAMLRequestURL, nil)
+	res, err = ac.client.Get(SAMLRequestURL)
 	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error building get request")
+		return samlAssertion, errors.Wrap(err, "error retrieving SAMLRequest results")
+	}
+	resBodyStr, _ = ac.responseBodyAsString(res.Body)
+
+	if ac.isHiddenForm(resBodyStr) {
+		resBodyStr, res, err = ac.reProcessForm(resBodyStr)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "error processing hiddenform")
+		}
 	}
 
-	res, err = ac.client.Do(req)
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error retrieving oidc login form results")
-	}
-
-	// if mfa skipped then get $Config and urlSkipMfaRegistration
-	// get urlSkipMfaRegistraition to return saml assertion
-	resBodyStr, err = ac.responseBodyAsString(res.Body)
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error oidc login response read")
-	}
 	if strings.Contains(resBodyStr, "arrUserProofs") {
 		var loginPasswordJson string
 		if strings.Contains(resBodyStr, "$Config") {
