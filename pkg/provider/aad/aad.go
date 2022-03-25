@@ -19,7 +19,6 @@ import (
 	"github.com/versent/saml2aws/v2/pkg/creds"
 	"github.com/versent/saml2aws/v2/pkg/prompter"
 	"github.com/versent/saml2aws/v2/pkg/provider"
-	"golang.org/x/net/html"
 )
 
 // Client wrapper around AzureAD enabling authentication and retrieval of assertions
@@ -246,6 +245,46 @@ type GetCredentialTypeResponse struct {
 	FlowToken          string `json:"FlowToken"`
 	IsSignupDisallowed bool   `json:"IsSignupDisallowed"`
 	APICanary          string `json:"apiCanary"`
+}
+
+// Autogenerate Authentication response
+// some case, some fields is not exists
+type AuthenticationResponse struct {
+	IMaxStackForKnockoutAsyncComponents int    `json:"iMaxStackForKnockoutAsyncComponents"`
+	FShowButtons                        bool   `json:"fShowButtons"`
+	URLCdn                              string `json:"urlCdn"`
+	URLDefaultFavicon                   string `json:"urlDefaultFavicon"`
+	URLFooterTOU                        string `json:"urlFooterTOU"`
+	URLFooterPrivacy                    string `json:"urlFooterPrivacy"`
+	URLPost                             string `json:"urlPost"`
+	IPawnIcon                           int    `json:"iPawnIcon"`
+	SPOSTUsername                       string `json:"sPOST_Username"`
+	SFT                                 string `json:"sFT"`
+	SFTName                             string `json:"sFTName"`
+	SCtx                                string `json:"sCtx"`
+	SCanaryTokenName                    string `json:"sCanaryTokenName"`
+	FIsRemoteNGCSupported               bool   `json:"fIsRemoteNGCSupported"`
+	FUseSameSite                        bool   `json:"fUseSameSite"`
+	IsGlobalTenant                      bool   `json:"isGlobalTenant"`
+	FOfflineAccountVisible              bool   `json:"fOfflineAccountVisible"`
+	ScriptNonce                         string `json:"scriptNonce"`
+	FEnableUserStateFix                 bool   `json:"fEnableUserStateFix"`
+	FShowAccessPassPeek                 bool   `json:"fShowAccessPassPeek"`
+	FUpdateSessionPollingLogic          bool   `json:"fUpdateSessionPollingLogic"`
+	Scid                                int    `json:"scid"`
+	Hpgact                              int    `json:"hpgact"`
+	Hpgid                               int    `json:"hpgid"`
+	Pgid                                string `json:"pgid"`
+	APICanary                           string `json:"apiCanary"`
+	Canary                              string `json:"canary"`
+	CorrelationID                       string `json:"correlationId"`
+	SessionID                           string `json:"sessionId"`
+	SlMaxRetry                          int    `json:"slMaxRetry"`
+	SlReportFailure                     bool   `json:"slReportFailure"`
+	Country                             string `json:"country"`
+	URLNoCookies                        string `json:"urlNoCookies"`
+	FTrimChromeBssoURL                  bool   `json:"fTrimChromeBssoUrl"`
+	InlineMode                          int    `json:"inlineMode"`
 }
 
 // Autogenerate password login response
@@ -702,114 +741,36 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 
 	federationRedirectURL := getCredentialTypeResponse.Credentials.FederationRedirectURL
 
+	var authenticationResponse AuthenticationResponse
 	if federationRedirectURL != "" {
-		// implement ADFS authentication here
-		// ideally as exeptional case joining back the default flow
+		authenticationResponse, res, err = ac.processADFSAuthentication(federationRedirectURL, loginDetails)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "error authenticating")
+		}
+	} else {
+		authenticationResponse, res, err = ac.processAuthentication(loginRequestUrl, refererUrl, loginDetails, startSAMLResp)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "error authenticating")
+		}
 	}
 
-	// password login
-	loginValues := url.Values{}
-	loginValues.Set(startSAMLResp.SFTName, startSAMLResp.SFT)
-	loginValues.Set("ctx", startSAMLResp.SCtx)
-	loginValues.Set("login", loginDetails.Username)
-	loginValues.Set("passwd", loginDetails.Password)
-
-	passwordLoginRequest, err := http.NewRequest("POST", loginRequestUrl, strings.NewReader(loginValues.Encode()))
-
+	res, err = ac.kmsiRequest(ac.fullUrl(res, authenticationResponse.URLPost), authenticationResponse.SFT, authenticationResponse.SCtx)
 	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error retrieving login results")
-	}
-	passwordLoginRequest.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	res, err = ac.client.Do(passwordLoginRequest)
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error retrieving login results")
+		return samlAssertion, errors.Wrap(err, "error processing KMSI request")
 	}
 
 	resBodyStr, _ := ac.responseBodyAsString(res.Body)
 
-	isSkippedMFA := !strings.HasPrefix(resBodyStr, "<html><head><title>Working...</title>")
-	/**
-	 * If conditional access is enabled, we will get a response like:
-	 *
-	 * <html><head><title>Working...</title></head><body><form method="POST" name="hiddenform" action="https://login.microsoftonline.com:443/common/DeviceAuthTls/reprocess"><input type="hidden" name="ctx" value="***" /><input type="hidden" name="flowtoken" value="***" /><noscript><p>Script is disabled. Click Submit to continue.</p><input type="submit" value="Submit" /></noscript></form><script language="javascript">document.forms[0].submit();</script></body></html>
-	 */
-	isEnabledConditonalAccess := strings.HasPrefix(resBodyStr, "<html><head><title>Working...</title>") && strings.Contains(resBodyStr, "name=\"flowtoken\"")
-
-	if isSkippedMFA || isEnabledConditonalAccess {
-		// require reprocess
-		if strings.Contains(resBodyStr, "<form") {
-			res, err = ac.reProcess(resBodyStr)
-			if err != nil {
-				return samlAssertion, errors.Wrap(err, "error retrieving login reprocess results")
-			}
-			resBodyStr, _ = ac.responseBodyAsString(res.Body)
-		}
-
-		var loginPasswordJson string
-		if strings.Contains(resBodyStr, "$Config") {
-			loginPasswordJson = ac.getJsonFromConfig(resBodyStr)
-		}
-		resBodyStr, err = ac.processAuth(loginPasswordJson, res)
+	if ac.isHiddenForm(resBodyStr) {
+		resBodyStr, _, err = ac.reProcessForm(resBodyStr)
 		if err != nil {
-			return samlAssertion, err
+			return samlAssertion, errors.Wrap(err, "error processing hiddenform")
 		}
 	}
-
-	node, _ := html.Parse(strings.NewReader(resBodyStr))
-	doc := goquery.NewDocumentFromNode(node)
-
-	// data in input tag
-	authForm := url.Values{}
-	var authSubmitURL string
-
-	doc.Find("input").Each(func(i int, s *goquery.Selection) {
-		name, ok := s.Attr("name")
-		if !ok {
-			return
-		}
-		value, ok := s.Attr("value")
-		if !ok {
-			return
-		}
-		authForm.Set(name, value)
-	})
-
-	doc.Find("form").Each(func(i int, s *goquery.Selection) {
-		action, ok := s.Attr("action")
-		if !ok {
-			return
-		}
-		authSubmitURL = action
-	})
-
-	if authSubmitURL == "" {
-		return samlAssertion, fmt.Errorf("unable to locate IDP oidc form submit URL")
-	}
-
-	req, err := http.NewRequest("POST", authSubmitURL, strings.NewReader(authForm.Encode()))
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error building authentication request")
-	}
-
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-	ac.client.EnableFollowRedirect()
-	res, err = ac.client.Do(req)
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error retrieving oidc login form results")
-	}
-
-	//  get saml assertion
-	oidcResponse, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "oidc login response error")
-	}
-
-	oidcResponseStr := string(oidcResponse)
 
 	// data is embedded javascript
 	// window.location = 'https:/..../?SAMLRequest=......'
-	oidcResponseList := strings.Split(oidcResponseStr, ";")
+	oidcResponseList := strings.Split(resBodyStr, ";")
 	var SAMLRequestURL string
 	for _, v := range oidcResponseList {
 		if strings.Contains(v, "SAMLRequest") {
@@ -826,7 +787,7 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		return samlAssertion, fmt.Errorf("unable to locate SAMLRequest URL")
 	}
 
-	req, err = http.NewRequest("GET", SAMLRequestURL, nil)
+	req, err := http.NewRequest("GET", SAMLRequestURL, nil)
 	if err != nil {
 		return samlAssertion, errors.Wrap(err, "error building get request")
 	}
@@ -854,7 +815,7 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	}
 
 	// data in input tag
-	doc, err = goquery.NewDocumentFromReader(strings.NewReader(resBodyStr))
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(resBodyStr))
 	if err != nil {
 		return samlAssertion, errors.Wrap(err, "failed to build document from response")
 	}
@@ -963,6 +924,110 @@ func (ac *Client) requestGetCredentialType(refererUrl string, loginDetails *cred
 	}
 
 	return getCredentialTypeResponse, res, nil
+}
+
+func (ac *Client) processADFSAuthentication(federationUrl string, loginDetails *creds.LoginDetails) (AuthenticationResponse, *http.Response, error) {
+	var res *http.Response
+	var err error
+	var resBodyStr string
+	var authenticationResponse AuthenticationResponse
+	var formValues url.Values
+	var formSubmitUrl string
+	var req *http.Request
+
+	res, err = ac.client.Get(federationUrl)
+	if err != nil {
+		return authenticationResponse, res, errors.Wrap(err, "error retrieving ADFS url")
+	}
+
+	resBodyStr, _ = ac.responseBodyAsString(res.Body)
+
+	formValues, formSubmitUrl, err = ac.reSubmitFormData(resBodyStr)
+	if err != nil {
+		return authenticationResponse, res, errors.Wrap(err, "failed to parse ADFS login form")
+	}
+
+	if formSubmitUrl == "" {
+		return authenticationResponse, res, fmt.Errorf("unable to locate ADFS form submit URL")
+	}
+
+	formValues.Set("UserName", loginDetails.Username)
+	formValues.Set("Password", loginDetails.Password)
+	formValues.Set("AuthMethod", "FormsAuthentication")
+
+	req, err = http.NewRequest("POST", ac.fullUrl(res, formSubmitUrl), strings.NewReader(formValues.Encode()))
+	if err != nil {
+		return authenticationResponse, res, errors.Wrap(err, "error building ADFS login request")
+	}
+
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	res, err = ac.client.Do(req)
+	if err != nil {
+		return authenticationResponse, res, errors.Wrap(err, "error retrieving ADFS login results")
+	}
+
+	resBodyStr, _ = ac.responseBodyAsString(res.Body)
+
+	if ac.isHiddenForm(resBodyStr) {
+		resBodyStr, res, err = ac.reProcessForm(resBodyStr)
+		if err != nil {
+			return authenticationResponse, res, errors.Wrap(err, "error processing hiddenform")
+		}
+	}
+
+	if err := json.Unmarshal([]byte(ac.getJsonFromConfig(resBodyStr)), &authenticationResponse); err != nil {
+		return authenticationResponse, res, errors.Wrap(err, "ADFS login response unmarshal error")
+	}
+
+	return authenticationResponse, res, nil
+}
+
+func (ac *Client) processAuthentication(loginUrl string, refererUrl string, loginDetails *creds.LoginDetails, convergedSignInResponse startSAMLResponse) (AuthenticationResponse, *http.Response, error) {
+	var res *http.Response
+	var err error
+	var resBodyStr string
+	var authenticationResponse AuthenticationResponse
+	var req *http.Request
+
+	formValues := url.Values{}
+	formValues.Set("canary", convergedSignInResponse.Canary)
+	formValues.Set("hpgrequestid", convergedSignInResponse.SessionID)
+	formValues.Set(convergedSignInResponse.SFTName, convergedSignInResponse.SFT)
+	formValues.Set("ctx", convergedSignInResponse.SCtx)
+	formValues.Set("login", loginDetails.Username)
+	formValues.Set("loginfmt", loginDetails.Username)
+	formValues.Set("passwd", loginDetails.Password)
+
+	req, err = http.NewRequest("POST", loginUrl, strings.NewReader(formValues.Encode()))
+	if err != nil {
+		return authenticationResponse, res, errors.Wrap(err, "error building login request")
+	}
+
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Add("Referer", refererUrl)
+
+	res, err = ac.client.Do(req)
+	if err != nil {
+		return authenticationResponse, res, errors.Wrap(err, "error retrieving login results")
+	}
+
+	resBodyStr, _ = ac.responseBodyAsString(res.Body)
+
+	if err := json.Unmarshal([]byte(ac.getJsonFromConfig(resBodyStr)), &authenticationResponse); err != nil {
+		return authenticationResponse, res, errors.Wrap(err, "login response unmarshal error")
+	}
+
+	// any authentication problem leads back to the origin ConvergedSignIn page
+	if authenticationResponse.Pgid == "ConvergedSignIn" {
+		var convergedSignInResponse startSAMLResponse
+		if err := json.Unmarshal([]byte(ac.getJsonFromConfig(resBodyStr)), &convergedSignInResponse); err != nil {
+			return authenticationResponse, res, errors.Wrap(err, "login response unmarshal error")
+		}
+		return authenticationResponse, res, fmt.Errorf("login error " + convergedSignInResponse.SErrorCode)
+	}
+
+	return authenticationResponse, res, nil
 }
 
 func (ac *Client) reProcess(resBodyStr string) (*http.Response, error) {
@@ -1257,4 +1322,75 @@ func (ac *Client) fullUrl(res *http.Response, urlFragment string) string {
 	} else {
 		return urlFragment
 	}
+}
+
+func (ac *Client) isHiddenForm(resBodyStr string) bool {
+	return strings.HasPrefix(resBodyStr, "<html><head><title>Working...</title>") && strings.Contains(resBodyStr, "name=\"hiddenform\"")
+}
+
+func (ac *Client) reProcessForm(srcBodyStr string) (string, *http.Response, error) {
+	var res *http.Response
+	var err error
+	var resBodyStr string
+	var formValues url.Values
+	var formSubmitUrl string
+
+	formValues, formSubmitUrl, err = ac.reSubmitFormData(srcBodyStr)
+	if err != nil {
+		return resBodyStr, res, errors.Wrap(err, "failed to parse hiddenform form")
+	}
+
+	if formSubmitUrl == "" {
+		return resBodyStr, res, fmt.Errorf("unable to locate hiddenform submit URL")
+	}
+
+	req, err := http.NewRequest("POST", formSubmitUrl, strings.NewReader(formValues.Encode()))
+	if err != nil {
+		return resBodyStr, res, errors.Wrap(err, "error building hiddenform request")
+	}
+
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	res, err = ac.client.Do(req)
+	if err != nil {
+		return resBodyStr, res, errors.Wrap(err, "error retrieving hiddenform results")
+	}
+
+	resBodyStr, _ = ac.responseBodyAsString(res.Body)
+
+	return resBodyStr, res, nil
+}
+
+func (ac *Client) reSubmitFormData(resBodyStr string) (url.Values, string, error) {
+	formValues := url.Values{}
+	var formSubmitUrl string
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(resBodyStr))
+	if err != nil {
+		return formValues, formSubmitUrl, errors.Wrap(err, "failed to build document from response")
+	}
+
+	// prefil form data from page as provided
+	doc.Find("input").Each(func(i int, s *goquery.Selection) {
+		name, ok := s.Attr("name")
+		if !ok {
+			return
+		}
+		value, ok := s.Attr("value")
+		if !ok {
+			return
+		}
+		formValues.Set(name, value)
+	})
+
+	// identify form submit url/path
+	doc.Find("form").Each(func(i int, s *goquery.Selection) {
+		action, ok := s.Attr("action")
+		if !ok {
+			return
+		}
+		formSubmitUrl = action
+	})
+
+	return formValues, formSubmitUrl, nil
 }
