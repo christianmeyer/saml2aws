@@ -1013,42 +1013,46 @@ func (ac *Client) processAuth(srcBodyStr string, res *http.Response) (string, er
 
 func (ac *Client) processMfaAuth(mfaResp mfaResponse, convergedResponse ConvergedResponse) (*http.Response, error) {
 	var res *http.Response
-	ProcessAuthValues := url.Values{}
-	ProcessAuthValues.Set(convergedResponse.SFTName, mfaResp.FlowToken)
-	ProcessAuthValues.Set("request", mfaResp.Ctx)
-	ProcessAuthValues.Set("login", convergedResponse.SPOSTUsername)
+	var err error
+	var resBodyStr string
+	var authenticationResponse AuthenticationResponse
+	var req *http.Request
 
-	ProcessAuthRequest, err := http.NewRequest("POST", convergedResponse.URLPost, strings.NewReader(ProcessAuthValues.Encode()))
+	formValues := url.Values{}
+	formValues.Set(convergedResponse.SFTName, mfaResp.FlowToken)
+	formValues.Set("request", mfaResp.Ctx)
+	formValues.Set("login", convergedResponse.SPOSTUsername)
+
+	req, err = http.NewRequest("POST", convergedResponse.URLPost, strings.NewReader(formValues.Encode()))
 	if err != nil {
-		return res, errors.Wrap(err, "error retrieving process auth results")
+		return res, errors.Wrap(err, "error building MFA ProcessAuth request")
 	}
-	ProcessAuthRequest.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	res, err = ac.client.Do(ProcessAuthRequest)
+
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	res, err = ac.client.Do(req)
 	if err != nil {
-		return res, errors.Wrap(err, "error retrieving process auth results")
+		return res, errors.Wrap(err, "error retrieving MFA ProcessAuth results")
 	}
-	// data is embeded javascript object
-	// <script><![CDATA[  $Config=......; ]]>
+
 	resBody, _ := ioutil.ReadAll(res.Body)
-	resBodyStr := string(resBody)
+	resBodyStr = string(resBody)
 	// reset res.Body so it can be read again later if required
 	res.Body = ioutil.NopCloser(bytes.NewBuffer(resBody))
 
-	// After performing MFA we may be prompted with KMSI (Keep Me Signed In) page
-	// Ref: https://docs.microsoft.com/ja-jp/azure/active-directory/fundamentals/keep-me-signed-in
-	if strings.Contains(resBodyStr, "$Config") {
-		ProcessAuthJson := ac.getJsonFromConfig(resBodyStr)
-
-		var processAuthResp processAuthResponse
-		if err := json.Unmarshal([]byte(ProcessAuthJson), &processAuthResp); err != nil {
-			return res, errors.Wrap(err, "ProcessAuth response unmarshal error")
+	// After performing MFA we may be prompted with a KMSI (Keep Me Signed In) page
+	// Ref: https://docs.microsoft.com/en-us/azure/active-directory/fundamentals/keep-me-signed-in
+	if strings.Contains(resBodyStr, "KmsiInterrupt") {
+		if err := json.Unmarshal([]byte(ac.getJsonFromConfig(resBodyStr)), &authenticationResponse); err != nil {
+			return res, errors.Wrap(err, "MFA ProcessAuth response unmarshal error")
 		}
 
-		res, err = ac.kmsiRequest(ac.fullUrl(res, processAuthResp.URLPost), processAuthResp.SFT, processAuthResp.SCtx)
+		res, err = ac.kmsiRequest(ac.fullUrl(res, authenticationResponse.URLPost), authenticationResponse.SFT, authenticationResponse.SCtx)
 		if err != nil {
-			return res, err
+			return res, errors.Wrap(err, "error processing KMSI request")
 		}
 	}
+
 	return res, nil
 }
 
