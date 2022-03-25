@@ -701,29 +701,6 @@ func (ac *Client) reProcess(resBodyStr string) (*http.Response, error) {
 	return res, nil
 }
 
-func (ac *Client) buildMfaRequestJson(mfas []userProof, flowToken string, ctx string) ([]byte, error) {
-	mfa := mfas[0]
-	switch ac.idpAccount.MFA {
-
-	case "Auto":
-		for _, v := range mfas {
-			if v.IsDefault {
-				mfa = v
-				break
-			}
-		}
-	default:
-		for _, v := range mfas {
-			if v.AuthMethodID == ac.idpAccount.MFA {
-				mfa = v
-				break
-			}
-		}
-	}
-	mfaReq := mfaRequest{AuthMethodID: mfa.AuthMethodID, Method: "BeginAuth", Ctx: ctx, FlowToken: flowToken}
-	return json.Marshal(mfaReq)
-}
-
 func (ac *Client) getJsonFromConfig(resBodyStr string) string {
 	/*
 	 * data is embedded in a javascript object
@@ -732,91 +709,6 @@ func (ac *Client) getJsonFromConfig(resBodyStr string) string {
 	startIndex := strings.Index(resBodyStr, "$Config=") + 8
 	endIndex := startIndex + strings.Index(resBodyStr[startIndex:], ";")
 	return resBodyStr[startIndex:endIndex]
-}
-
-func (ac *Client) getMfaFlowToken(mfas []userProof, convergedResponse ConvergedResponse) (mfaResponse, error) {
-	var mfaResp mfaResponse
-	if len(mfas) == 0 {
-		return mfaResp, fmt.Errorf("mfa not found")
-	}
-	mfaReqJson, err := ac.buildMfaRequestJson(mfas, convergedResponse.SFT, convergedResponse.SCtx)
-	if err != nil {
-		return mfaResp, err
-	}
-	mfaBeginRequest, err := http.NewRequest("POST", convergedResponse.URLBeginAuth, strings.NewReader(string(mfaReqJson)))
-	if err != nil {
-		return mfaResp, errors.Wrap(err, "error retrieving begin mfa")
-	}
-	mfaBeginRequest.Header.Add("Content-Type", "application/json")
-	res, err := ac.client.Do(mfaBeginRequest)
-	if err != nil {
-		return mfaResp, errors.Wrap(err, "error retrieving begin mfa")
-	}
-	mfaBeginJson := make([]byte, res.ContentLength)
-	if n, err := res.Body.Read(mfaBeginJson); err != nil && err != io.EOF || n != int(res.ContentLength) {
-		return mfaResp, errors.Wrap(err, "mfa BeginAuth response error")
-	}
-
-	if err := json.Unmarshal(mfaBeginJson, &mfaResp); err != nil {
-		return mfaResp, errors.Wrap(err, "mfa BeginAuth  response unmarshal error")
-	}
-	if !mfaResp.Success {
-		return mfaResp, fmt.Errorf("mfa BeginAuth is not success %v", mfaResp.Message)
-	}
-
-	//  mfa end
-	for i := 0; ; i++ {
-		mfaReq := mfaRequest{
-			AuthMethodID: mfaResp.AuthMethodID,
-			Method:       "EndAuth",
-			Ctx:          mfaResp.Ctx,
-			FlowToken:    mfaResp.FlowToken,
-			SessionID:    mfaResp.SessionID,
-		}
-		if mfaReq.AuthMethodID == "PhoneAppOTP" || mfaReq.AuthMethodID == "OneWaySMS" {
-			verifyCode := prompter.StringRequired("Enter verification code")
-			mfaReq.AdditionalAuthData = verifyCode
-		}
-		if mfaReq.AuthMethodID == "PhoneAppNotification" && i == 0 {
-			log.Println("Phone approval required.")
-		}
-		mfaReqJson, err := json.Marshal(mfaReq)
-		if err != nil {
-			return mfaResp, err
-		}
-		mfaEndRequest, err := http.NewRequest("POST", convergedResponse.URLEndAuth, strings.NewReader(string(mfaReqJson)))
-		if err != nil {
-			return mfaResp, errors.Wrap(err, "error retrieving begin mfa")
-		}
-		mfaEndRequest.Header.Add("Content-Type", "application/json")
-		res, err = ac.client.Do(mfaEndRequest)
-		if err != nil {
-			return mfaResp, errors.Wrap(err, "error retrieving begin mfa")
-		}
-		mfaJson := make([]byte, res.ContentLength)
-		if n, err := res.Body.Read(mfaJson); err != nil && err != io.EOF || n != int(res.ContentLength) {
-			return mfaResp, errors.Wrap(err, "mfa EndAuth response error")
-		}
-		if err := json.Unmarshal(mfaJson, &mfaResp); err != nil {
-			return mfaResp, errors.Wrap(err, "mfa EndAuth  response unmarshal error")
-		}
-		if mfaResp.ErrCode != 0 {
-			return mfaResp, fmt.Errorf("error mfa fail errcode: %d, message: %v", mfaResp.ErrCode, mfaResp.Message)
-		}
-		if mfaResp.Success {
-			break
-		}
-		if !mfaResp.Retry {
-			break
-		}
-		// if mfaResp.Retry == true then
-		// must exist loginPasswordResp.OPerAuthPollingInterval[mfaResp.AuthMethodID]
-		time.Sleep(time.Duration(convergedResponse.OPerAuthPollingInterval[mfaResp.AuthMethodID]) * time.Second)
-	}
-	if !mfaResp.Success {
-		return mfaResp, fmt.Errorf("error mfa fail")
-	}
-	return mfaResp, nil
 }
 
 func (ac *Client) kmsiRequest(requestUrl string, flowToken string, ctx string) (*http.Response, error) {
@@ -862,15 +754,8 @@ func (ac *Client) processAuth(srcBodyStr string, res *http.Response) (string, er
 			return resBodyStr, errors.Wrap(err, "error retrieving skip mfa results")
 		}
 	} else if len(mfas) != 0 {
-		// There's no explicit option to skip MFA, and MFA options are available
-		// Start MFA
-		mfaResp, err := ac.getMfaFlowToken(mfas, convergedResponse)
-		if err != nil {
-			return resBodyStr, err
-		}
-
-		// ProcessAuth
-		res, err = ac.processMfaAuth(mfaResp, convergedResponse)
+		// there's no explicit option to skip MFA, and MFA options are available
+		res, err = ac.processMfa(mfas, convergedResponse)
 		if err != nil {
 			return resBodyStr, err
 		}
@@ -893,6 +778,158 @@ func (ac *Client) processAuth(srcBodyStr string, res *http.Response) (string, er
 	}
 
 	return ac.responseBodyAsString(res.Body)
+}
+
+func (ac *Client) processMfa(mfas []userProof, convergedResponse ConvergedResponse) (*http.Response, error) {
+	var res *http.Response
+	var err error
+	var mfaResp mfaResponse
+
+	if len(mfas) == 0 {
+		return res, fmt.Errorf("MFA not found")
+	}
+
+	mfaResp, err = ac.processMfaBeginAuth(mfas, convergedResponse)
+	if err != nil {
+		return res, errors.Wrap(err, "error processing MFA BeginAuth")
+	}
+
+	for i := 0; ; i++ {
+		mfaReq := mfaRequest{
+			AuthMethodID: mfaResp.AuthMethodID,
+			Method:       "EndAuth",
+			Ctx:          mfaResp.Ctx,
+			FlowToken:    mfaResp.FlowToken,
+			SessionID:    mfaResp.SessionID,
+		}
+		if mfaReq.AuthMethodID == "PhoneAppOTP" || mfaReq.AuthMethodID == "OneWaySMS" {
+			verifyCode := prompter.StringRequired("Enter verification code")
+			mfaReq.AdditionalAuthData = verifyCode
+		}
+		if mfaReq.AuthMethodID == "PhoneAppNotification" && i == 0 {
+			log.Println("Phone approval required.")
+		}
+
+		mfaResp, err = ac.processMfaEndAuth(mfaReq, convergedResponse)
+		if err != nil {
+			return res, errors.Wrap(err, "error processing MFA EndAuth")
+		}
+
+		if mfaResp.ErrCode != 0 {
+			return res, fmt.Errorf("error processing MFA, errcode: %d, message: %v", mfaResp.ErrCode, mfaResp.Message)
+		}
+
+		if mfaResp.Success {
+			break
+		}
+		if !mfaResp.Retry {
+			break
+		}
+
+		// if mfaResp.Retry == true then
+		// must exist convergedResponse.OPerAuthPollingInterval[mfaResp.AuthMethodID]
+		time.Sleep(time.Duration(convergedResponse.OPerAuthPollingInterval[mfaResp.AuthMethodID]) * time.Second)
+	}
+
+	if !mfaResp.Success {
+		return res, fmt.Errorf("error processing MFA")
+	}
+
+	res, err = ac.processMfaAuth(mfaResp, convergedResponse)
+	if err != nil {
+		return res, errors.Wrap(err, "error processing MFA ProcessAuth")
+	}
+
+	return res, nil
+}
+
+func (ac *Client) processMfaBeginAuth(mfas []userProof, convergedResponse ConvergedResponse) (mfaResponse, error) {
+	var res *http.Response
+	var err error
+	var mfaResp mfaResponse
+	var req *http.Request
+
+	mfa := mfas[0]
+	switch ac.idpAccount.MFA {
+	case "Auto":
+		for _, v := range mfas {
+			if v.IsDefault {
+				mfa = v
+				break
+			}
+		}
+	default:
+		for _, v := range mfas {
+			if v.AuthMethodID == ac.idpAccount.MFA {
+				mfa = v
+				break
+			}
+		}
+	}
+	mfaReqObj := mfaRequest{
+		AuthMethodID: mfa.AuthMethodID,
+		Method:       "BeginAuth",
+		Ctx:          convergedResponse.SCtx,
+		FlowToken:    convergedResponse.SFT,
+	}
+	mfaReqJson, err := json.Marshal(mfaReqObj)
+	if err != nil {
+		return mfaResp, errors.Wrap(err, "failed to build MFA BeginAuth request body")
+	}
+
+	req, err = http.NewRequest("POST", convergedResponse.URLBeginAuth, strings.NewReader(string(mfaReqJson)))
+	if err != nil {
+		return mfaResp, errors.Wrap(err, "error building MFA BeginAuth request")
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+
+	res, err = ac.client.Do(req)
+	if err != nil {
+		return mfaResp, errors.Wrap(err, "error retrieving MFA BeginAuth results")
+	}
+
+	err = json.NewDecoder(res.Body).Decode(&mfaResp)
+	if err != nil {
+		return mfaResp, errors.Wrap(err, "error decoding MFA BeginAuth results")
+	}
+
+	if !mfaResp.Success {
+		return mfaResp, fmt.Errorf("MFA BeginAuth result is not success: %v", mfaResp.Message)
+	}
+
+	return mfaResp, nil
+}
+
+func (ac *Client) processMfaEndAuth(mfaReqObj mfaRequest, convergedResponse ConvergedResponse) (mfaResponse, error) {
+	var res *http.Response
+	var err error
+	var mfaResp mfaResponse
+	var req *http.Request
+
+	mfaReqJson, err := json.Marshal(mfaReqObj)
+	if err != nil {
+		return mfaResp, errors.Wrap(err, "failed to build MFA EndAuth request body")
+	}
+
+	req, err = http.NewRequest("POST", convergedResponse.URLEndAuth, strings.NewReader(string(mfaReqJson)))
+	if err != nil {
+		return mfaResp, errors.Wrap(err, "error building MFA EndAuth request")
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+
+	res, err = ac.client.Do(req)
+	if err != nil {
+		return mfaResp, errors.Wrap(err, "error retrieving MFA EndAuth results")
+	}
+
+	err = json.NewDecoder(res.Body).Decode(&mfaResp)
+	if err != nil {
+		return mfaResp, errors.Wrap(err, "error decoding MFA EndAuth results")
+	}
+
+	return mfaResp, nil
 }
 
 func (ac *Client) processMfaAuth(mfaResp mfaResponse, convergedResponse ConvergedResponse) (*http.Response, error) {
