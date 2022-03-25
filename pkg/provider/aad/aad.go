@@ -642,19 +642,9 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	// startSAML
 	startURL := fmt.Sprintf("%s/applications/redirecttofederatedapplication.aspx?Operation=LinkedSignIn&applicationId=%s", ac.idpAccount.URL, ac.idpAccount.AppID)
 
-	res, err := ac.client.Get(startURL)
+	startSAMLResp, res, err := ac.requestConvergedSignIn(startURL)
 	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error retrieving form")
-	}
-
-	resBodyStr, _ := ac.responseBodyAsString(res.Body)
-	var startSAMLJson string
-	if strings.Contains(resBodyStr, "$Config") {
-		startSAMLJson = ac.getJsonFromConfig(resBodyStr)
-	}
-	var startSAMLResp startSAMLResponse
-	if err := json.Unmarshal([]byte(startSAMLJson), &startSAMLResp); err != nil {
-		return samlAssertion, errors.Wrap(err, "startSAML response unmarshal error")
+		return samlAssertion, errors.Wrap(err, "error processing ConvergedSignIn request")
 	}
 
 	// password login
@@ -675,7 +665,7 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		return samlAssertion, errors.Wrap(err, "error retrieving login results")
 	}
 
-	resBodyStr, _ = ac.responseBodyAsString(res.Body)
+	resBodyStr, _ := ac.responseBodyAsString(res.Body)
 
 	isSkippedMFA := !strings.HasPrefix(resBodyStr, "<html><head><title>Working...</title>")
 	/**
@@ -849,6 +839,26 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	}
 
 	return samlAssertion, errors.New("failed get SAMLAssertion")
+}
+
+func (ac *Client) requestConvergedSignIn(url string) (startSAMLResponse, *http.Response, error) {
+	var res *http.Response
+	var err error
+	var resBodyStr string
+	var convergedSignInResponse startSAMLResponse
+
+	res, err = ac.client.Get(url)
+	if err != nil {
+		return convergedSignInResponse, res, errors.Wrap(err, "error retrieving ConvergedSignIn form")
+	}
+
+	resBodyStr, _ = ac.responseBodyAsString(res.Body)
+
+	if err := json.Unmarshal([]byte(ac.getJsonFromConfig(resBodyStr)), &convergedSignInResponse); err != nil {
+		return convergedSignInResponse, res, errors.Wrap(err, "ConvergedSignIn response unmarshal error")
+	}
+
+	return convergedSignInResponse, res, nil
 }
 
 func (ac *Client) reProcess(resBodyStr string) (*http.Response, error) {
