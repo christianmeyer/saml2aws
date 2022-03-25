@@ -664,16 +664,7 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	loginValues.Set("login", loginDetails.Username)
 	loginValues.Set("passwd", loginDetails.Password)
 
-	// Sometimes AAD response may contain "post url" as a relative url
-	// in this case, prepend the url scheme and host, of the URL we requested
-	var urlPost string
-	if strings.HasPrefix(startSAMLResp.URLPost, "/") {
-		urlPost = res.Request.URL.Scheme + "://" + res.Request.URL.Host + startSAMLResp.URLPost
-	} else {
-		urlPost = startSAMLResp.URLPost
-	}
-
-	passwordLoginRequest, err := http.NewRequest("POST", urlPost, strings.NewReader(loginValues.Encode()))
+	passwordLoginRequest, err := http.NewRequest("POST", ac.fullUrl(res, startSAMLResp.URLPost), strings.NewReader(loginValues.Encode()))
 
 	if err != nil {
 		return samlAssertion, errors.Wrap(err, "error retrieving login results")
@@ -1016,9 +1007,8 @@ func (ac *Client) getMfaFlowToken(mfas []userProof, loginPasswordResp passwordLo
 	return mfaResp, nil
 }
 
-func (ac *Client) kmsiRequest(scheme string, host string, urlPost string, flowToken string, ctx string) (*http.Response, error) {
+func (ac *Client) kmsiRequest(KmsiURL string, flowToken string, ctx string) (*http.Response, error) {
 	var res *http.Response
-	KmsiURL := scheme + "://" + host + urlPost
 	KmsiValues := url.Values{}
 	KmsiValues.Set("flowToken", flowToken)
 	KmsiValues.Set("ctx", ctx)
@@ -1087,8 +1077,7 @@ func (ac *Client) processAuth(loginPasswordJson string, res *http.Response) (str
 	//  - we're accessing from an MFA whitelisted / trusted IP
 	//  - we've been exempted from a Conditional Access Policy
 	if loginPasswordResp.URLPost == "/kmsi" {
-		res, err = ac.kmsiRequest(
-			res.Request.URL.Scheme, res.Request.URL.Host, loginPasswordResp.URLPost, loginPasswordResp.SFT, loginPasswordResp.SCtx)
+		res, err = ac.kmsiRequest(ac.fullUrl(res, loginPasswordResp.URLPost), loginPasswordResp.SFT, loginPasswordResp.SCtx)
 		if err != nil {
 			return resBodyStr, err
 		}
@@ -1130,8 +1119,7 @@ func (ac *Client) processMfaAuth(mfaResp mfaResponse, loginPasswordResp password
 			return res, errors.Wrap(err, "ProcessAuth response unmarshal error")
 		}
 
-		res, err = ac.kmsiRequest(
-			res.Request.URL.Scheme, res.Request.URL.Host, processAuthResp.URLPost, processAuthResp.SFT, processAuthResp.SCtx)
+		res, err = ac.kmsiRequest(ac.fullUrl(res, processAuthResp.URLPost), processAuthResp.SFT, processAuthResp.SCtx)
 		if err != nil {
 			return res, err
 		}
@@ -1142,4 +1130,12 @@ func (ac *Client) processMfaAuth(mfaResp mfaResponse, loginPasswordResp password
 func (ac *Client) responseBodyAsString(body io.ReadCloser) (string, error) {
 	resBody, err := ioutil.ReadAll(body)
 	return string(resBody), err
+}
+
+func (ac *Client) fullUrl(res *http.Response, urlFragment string) string {
+	if strings.HasPrefix(urlFragment, "/") {
+		return res.Request.URL.Scheme + "://" + res.Request.URL.Host + urlFragment
+	} else {
+		return urlFragment
+	}
 }
