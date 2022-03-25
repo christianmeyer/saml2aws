@@ -447,49 +447,24 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		}
 	}
 
-	// data in input tag
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(resBodyStr))
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "failed to build document from response")
-	}
-
-	doc.Find("input").Each(func(i int, s *goquery.Selection) {
-		attrName, ok := s.Attr("name")
-		if !ok {
-			return
-		}
-		if attrName != "SAMLResponse" {
-			return
-		}
-		samlAssertion, _ = s.Attr("value")
-	})
-	if samlAssertion != "" {
-		return samlAssertion, nil
-	}
-	res, err = ac.reProcess(resBodyStr)
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "failed to saml request reprocess")
-	}
-	resBodyStr, _ = ac.responseBodyAsString(res.Body)
-	doc, err = goquery.NewDocumentFromReader(strings.NewReader(resBodyStr))
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "failed to build document from result body")
-	}
-
-	doc.Find("input").Each(func(i int, s *goquery.Selection) {
-		attrName, ok := s.Attr("name")
-		if !ok {
-			return
+	for i := 0; i < 2; i++ {
+		// SAMLResponse should come in a form
+		samlAssertion, err = ac.getSamlAssertion(resBodyStr)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "failed to read SAMLResponse")
 		}
 
-		if attrName != "SAMLResponse" {
-			return
+		if samlAssertion != "" {
+			return samlAssertion, nil
 		}
 
-		samlAssertion, _ = s.Attr("value")
-	})
-	if samlAssertion != "" {
-		return samlAssertion, nil
+		// form does not contain SAMLResponse, aim to get it from the submit response
+		if i < 1 {
+			resBodyStr, _, err = ac.reProcessForm(resBodyStr)
+			if err != nil {
+				return samlAssertion, errors.Wrap(err, "error processing hiddenform")
+			}
+		}
 	}
 
 	return samlAssertion, errors.New("failed get SAMLAssertion")
@@ -1059,4 +1034,26 @@ func (ac *Client) reSubmitFormData(resBodyStr string) (url.Values, string, error
 	})
 
 	return formValues, formSubmitUrl, nil
+}
+
+func (ac *Client) getSamlAssertion(resBodyStr string) (string, error) {
+	var samlAssertion string
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(resBodyStr))
+	if err != nil {
+		return samlAssertion, errors.Wrap(err, "failed to build document from response")
+	}
+
+	doc.Find("input").Each(func(i int, s *goquery.Selection) {
+		attrName, ok := s.Attr("name")
+		if !ok {
+			return
+		}
+		if attrName != "SAMLResponse" {
+			return
+		}
+		samlAssertion, _ = s.Attr("value")
+	})
+
+	return samlAssertion, nil
 }
