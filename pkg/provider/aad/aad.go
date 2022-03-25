@@ -1007,23 +1007,28 @@ func (ac *Client) getMfaFlowToken(mfas []userProof, loginPasswordResp passwordLo
 	return mfaResp, nil
 }
 
-func (ac *Client) kmsiRequest(KmsiURL string, flowToken string, ctx string) (*http.Response, error) {
+func (ac *Client) kmsiRequest(requestUrl string, flowToken string, ctx string) (*http.Response, error) {
 	var res *http.Response
-	KmsiValues := url.Values{}
-	KmsiValues.Set("flowToken", flowToken)
-	KmsiValues.Set("ctx", ctx)
-	KmsiValues.Set("LoginOptions", "1")
-	KmsiRequest, err := http.NewRequest("POST", KmsiURL, strings.NewReader(KmsiValues.Encode()))
+
+	formValues := url.Values{}
+	formValues.Set("flowToken", flowToken)
+	formValues.Set("ctx", ctx)
+	formValues.Set("LoginOptions", "1")
+
+	req, err := http.NewRequest("POST", requestUrl, strings.NewReader(formValues.Encode()))
 	if err != nil {
-		return res, errors.Wrap(err, "error retrieving kmsi results")
+		return res, errors.Wrap(err, "error building KMSI request")
 	}
-	KmsiRequest.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
 	ac.client.DisableFollowRedirect()
-	res, err = ac.client.Do(KmsiRequest)
+	res, err = ac.client.Do(req)
 	if err != nil {
-		return res, errors.Wrap(err, "error retrieving kmsi results")
+		return res, errors.Wrap(err, "error retrieving KMSI results")
 	}
 	ac.client.EnableFollowRedirect()
+
 	return res, nil
 }
 
