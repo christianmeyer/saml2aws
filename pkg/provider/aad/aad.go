@@ -287,6 +287,21 @@ type AuthenticationResponse struct {
 	InlineMode                          int    `json:"inlineMode"`
 }
 
+// Converged response
+type ConvergedResponse struct {
+	ArrUserProofs           []userProof        `json:"arrUserProofs"`
+	URLSkipMfaRegistration  string             `json:"urlSkipMfaRegistration"`
+	OPerAuthPollingInterval map[string]float64 `json:"oPerAuthPollingInterval"`
+	URLBeginAuth            string             `json:"urlBeginAuth"`
+	URLEndAuth              string             `json:"urlEndAuth"`
+	URLPost                 string             `json:"urlPost"`
+	SPOSTUsername           string             `json:"sPOST_Username"`
+	SFT                     string             `json:"sFT"`
+	SFTName                 string             `json:"sFTName"`
+	SCtx                    string             `json:"sCtx"`
+	Pgid                    string             `json:"pgid"`
+}
+
 // Autogenerate password login response
 // some case, some fields is not exists
 type passwordLoginResponse struct {
@@ -1094,16 +1109,16 @@ func (ac *Client) getJsonFromConfig(resBodyStr string) string {
 	return resBodyStr[startIndex:endIndex]
 }
 
-func (ac *Client) getMfaFlowToken(mfas []userProof, loginPasswordResp passwordLoginResponse) (mfaResponse, error) {
+func (ac *Client) getMfaFlowToken(mfas []userProof, convergedResponse ConvergedResponse) (mfaResponse, error) {
 	var mfaResp mfaResponse
 	if len(mfas) == 0 {
 		return mfaResp, fmt.Errorf("mfa not found")
 	}
-	mfaReqJson, err := ac.buildMfaRequestJson(mfas, loginPasswordResp.SFT, loginPasswordResp.SCtx)
+	mfaReqJson, err := ac.buildMfaRequestJson(mfas, convergedResponse.SFT, convergedResponse.SCtx)
 	if err != nil {
 		return mfaResp, err
 	}
-	mfaBeginRequest, err := http.NewRequest("POST", loginPasswordResp.URLBeginAuth, strings.NewReader(string(mfaReqJson)))
+	mfaBeginRequest, err := http.NewRequest("POST", convergedResponse.URLBeginAuth, strings.NewReader(string(mfaReqJson)))
 	if err != nil {
 		return mfaResp, errors.Wrap(err, "error retrieving begin mfa")
 	}
@@ -1144,7 +1159,7 @@ func (ac *Client) getMfaFlowToken(mfas []userProof, loginPasswordResp passwordLo
 		if err != nil {
 			return mfaResp, err
 		}
-		mfaEndRequest, err := http.NewRequest("POST", loginPasswordResp.URLEndAuth, strings.NewReader(string(mfaReqJson)))
+		mfaEndRequest, err := http.NewRequest("POST", convergedResponse.URLEndAuth, strings.NewReader(string(mfaReqJson)))
 		if err != nil {
 			return mfaResp, errors.Wrap(err, "error retrieving begin mfa")
 		}
@@ -1171,7 +1186,7 @@ func (ac *Client) getMfaFlowToken(mfas []userProof, loginPasswordResp passwordLo
 		}
 		// if mfaResp.Retry == true then
 		// must exist loginPasswordResp.OPerAuthPollingInterval[mfaResp.AuthMethodID]
-		time.Sleep(time.Duration(loginPasswordResp.OPerAuthPollingInterval[mfaResp.AuthMethodID]) * time.Second)
+		time.Sleep(time.Duration(convergedResponse.OPerAuthPollingInterval[mfaResp.AuthMethodID]) * time.Second)
 	}
 	if !mfaResp.Success {
 		return mfaResp, fmt.Errorf("error mfa fail")
@@ -1206,41 +1221,31 @@ func (ac *Client) kmsiRequest(requestUrl string, flowToken string, ctx string) (
 
 func (ac *Client) processAuth(srcBodyStr string, res *http.Response) (string, error) {
 	var err error
-	var loginPasswordResp passwordLoginResponse
-	var loginPasswordSkipMfaResp SkipMfaResponse
-	var restartSAMLResp startSAMLResponse
+	var convergedResponse ConvergedResponse
 	var resBodyStr string
 
-	loginPasswordJson := ac.getJsonFromConfig(srcBodyStr)
-
-	if err := json.Unmarshal([]byte(loginPasswordJson), &loginPasswordResp); err != nil {
-		return resBodyStr, errors.Wrap(err, "loginPassword response unmarshal error")
-	}
-	if err := json.Unmarshal([]byte(loginPasswordJson), &loginPasswordSkipMfaResp); err != nil {
-		return resBodyStr, errors.Wrap(err, "loginPassword response unmarshal error")
-	}
-	if err := json.Unmarshal([]byte(loginPasswordJson), &restartSAMLResp); err != nil {
-		return resBodyStr, errors.Wrap(err, "startSAML response unmarshal error")
+	if err := json.Unmarshal([]byte(ac.getJsonFromConfig(srcBodyStr)), &convergedResponse); err != nil {
+		return resBodyStr, errors.Wrap(err, "ConvergedTFA response unmarshal error")
 	}
 
-	mfas := loginPasswordResp.ArrUserProofs
+	mfas := convergedResponse.ArrUserProofs
 
 	// If there's an explicit option to skip MFA, do so
-	if loginPasswordSkipMfaResp.URLSkipMfaRegistration != "" {
-		res, err = ac.client.Get(loginPasswordSkipMfaResp.URLSkipMfaRegistration)
+	if convergedResponse.URLSkipMfaRegistration != "" {
+		res, err = ac.client.Get(convergedResponse.URLSkipMfaRegistration)
 		if err != nil {
 			return resBodyStr, errors.Wrap(err, "error retrieving skip mfa results")
 		}
 	} else if len(mfas) != 0 {
 		// There's no explicit option to skip MFA, and MFA options are available
 		// Start MFA
-		mfaResp, err := ac.getMfaFlowToken(mfas, loginPasswordResp)
+		mfaResp, err := ac.getMfaFlowToken(mfas, convergedResponse)
 		if err != nil {
 			return resBodyStr, err
 		}
 
 		// ProcessAuth
-		res, err = ac.processMfaAuth(mfaResp, loginPasswordResp, restartSAMLResp)
+		res, err = ac.processMfaAuth(mfaResp, convergedResponse)
 		if err != nil {
 			return resBodyStr, err
 		}
@@ -1255,8 +1260,8 @@ func (ac *Client) processAuth(srcBodyStr string, res *http.Response) (string, er
 	// Azure can do this if MFA is enabled but
 	//  - we're accessing from an MFA whitelisted / trusted IP
 	//  - we've been exempted from a Conditional Access Policy
-	if loginPasswordResp.URLPost == "/kmsi" {
-		res, err = ac.kmsiRequest(ac.fullUrl(res, loginPasswordResp.URLPost), loginPasswordResp.SFT, loginPasswordResp.SCtx)
+	if convergedResponse.URLPost == "/kmsi" {
+		res, err = ac.kmsiRequest(ac.fullUrl(res, convergedResponse.URLPost), convergedResponse.SFT, convergedResponse.SCtx)
 		if err != nil {
 			return resBodyStr, err
 		}
@@ -1265,14 +1270,14 @@ func (ac *Client) processAuth(srcBodyStr string, res *http.Response) (string, er
 	return ac.responseBodyAsString(res.Body)
 }
 
-func (ac *Client) processMfaAuth(mfaResp mfaResponse, loginPasswordResp passwordLoginResponse, restartSAMLResp startSAMLResponse) (*http.Response, error) {
+func (ac *Client) processMfaAuth(mfaResp mfaResponse, convergedResponse ConvergedResponse) (*http.Response, error) {
 	var res *http.Response
 	ProcessAuthValues := url.Values{}
-	ProcessAuthValues.Set(restartSAMLResp.SFTName, mfaResp.FlowToken)
+	ProcessAuthValues.Set(convergedResponse.SFTName, mfaResp.FlowToken)
 	ProcessAuthValues.Set("request", mfaResp.Ctx)
-	ProcessAuthValues.Set("login", loginPasswordResp.SPOSTUsername)
+	ProcessAuthValues.Set("login", convergedResponse.SPOSTUsername)
 
-	ProcessAuthRequest, err := http.NewRequest("POST", loginPasswordResp.URLPost, strings.NewReader(ProcessAuthValues.Encode()))
+	ProcessAuthRequest, err := http.NewRequest("POST", convergedResponse.URLPost, strings.NewReader(ProcessAuthValues.Encode()))
 	if err != nil {
 		return res, errors.Wrap(err, "error retrieving process auth results")
 	}
