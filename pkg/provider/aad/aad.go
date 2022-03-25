@@ -801,11 +801,7 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	}
 
 	if strings.Contains(resBodyStr, "arrUserProofs") {
-		var loginPasswordJson string
-		if strings.Contains(resBodyStr, "$Config") {
-			loginPasswordJson = ac.getJsonFromConfig(resBodyStr)
-		}
-		resBodyStr, err = ac.processAuth(loginPasswordJson, res)
+		resBodyStr, err = ac.processAuth(resBodyStr, res)
 		if err != nil {
 			return samlAssertion, err
 		}
@@ -1208,12 +1204,14 @@ func (ac *Client) kmsiRequest(requestUrl string, flowToken string, ctx string) (
 	return res, nil
 }
 
-func (ac *Client) processAuth(loginPasswordJson string, res *http.Response) (string, error) {
+func (ac *Client) processAuth(srcBodyStr string, res *http.Response) (string, error) {
 	var err error
 	var loginPasswordResp passwordLoginResponse
 	var loginPasswordSkipMfaResp SkipMfaResponse
 	var restartSAMLResp startSAMLResponse
 	var resBodyStr string
+
+	loginPasswordJson := ac.getJsonFromConfig(srcBodyStr)
 
 	if err := json.Unmarshal([]byte(loginPasswordJson), &loginPasswordResp); err != nil {
 		return resBodyStr, errors.Wrap(err, "loginPassword response unmarshal error")
