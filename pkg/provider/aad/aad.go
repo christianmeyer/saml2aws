@@ -647,8 +647,6 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		return samlAssertion, errors.Wrap(err, "error retrieving form")
 	}
 
-	// data is embedded javascript object
-	// <script><![CDATA[  $Config=......; ]]>
 	resBodyStr, _ := ac.responseBodyAsString(res.Body)
 	var startSAMLJson string
 	if strings.Contains(resBodyStr, "$Config") {
@@ -706,8 +704,6 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 			resBodyStr, _ = ac.responseBodyAsString(res.Body)
 		}
 
-		// data is embedded javascript object
-		// <script><![CDATA[  $Config=......; ]]>
 		var loginPasswordJson string
 		if strings.Contains(resBodyStr, "$Config") {
 			loginPasswordJson = ac.getJsonFromConfig(resBodyStr)
@@ -806,8 +802,6 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		return samlAssertion, errors.Wrap(err, "error oidc login response read")
 	}
 	if strings.Contains(resBodyStr, "arrUserProofs") {
-		// data is embedded javascript object
-		// <script><![CDATA[  $Config=......; ]]>
 		var loginPasswordJson string
 		if strings.Contains(resBodyStr, "$Config") {
 			loginPasswordJson = ac.getJsonFromConfig(resBodyStr)
@@ -928,6 +922,10 @@ func (ac *Client) buildMfaRequestJson(mfas []userProof, flowToken string, ctx st
 }
 
 func (ac *Client) getJsonFromConfig(resBodyStr string) string {
+	/*
+	 * data is embedded in a javascript object
+	 * <script><![CDATA[  $Config=......; ]]>
+	 */
 	startIndex := strings.Index(resBodyStr, "$Config=") + 8
 	endIndex := startIndex + strings.Index(resBodyStr[startIndex:], ";")
 	return resBodyStr[startIndex:endIndex]
