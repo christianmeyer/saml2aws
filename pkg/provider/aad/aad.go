@@ -638,44 +638,6 @@ func (ac *Client) processAuthentication(loginUrl string, refererUrl string, logi
 	return authenticationResponse, res, nil
 }
 
-func (ac *Client) reProcess(resBodyStr string) (*http.Response, error) {
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(resBodyStr))
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to build document from response")
-	}
-
-	var action, ctx, flowToken string
-	doc.Find("form").Each(func(i int, s *goquery.Selection) {
-		action, _ = s.Attr("action")
-	})
-	doc.Find("input").Each(func(i int, s *goquery.Selection) {
-		attrName, ok := s.Attr("name")
-		if !ok {
-			return
-		}
-		if attrName == "ctx" {
-			ctx, _ = s.Attr("value")
-		}
-		if attrName == "flowtoken" {
-			flowToken, _ = s.Attr("value")
-		}
-	})
-
-	reprocessValues := url.Values{}
-	reprocessValues.Set("ctx", ctx)
-	reprocessValues.Set("flowtoken", flowToken)
-	reprocessRequest, err := http.NewRequest("post", action, strings.NewReader(reprocessValues.Encode()))
-	if err != nil {
-		return nil, errors.Wrap(err, "error reprocess create httpRequest")
-	}
-	reprocessRequest.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	res, err := ac.client.Do(reprocessRequest)
-	if err != nil {
-		return res, errors.Wrap(err, "error reprocess results")
-	}
-	return res, nil
-}
-
 func (ac *Client) getJsonFromConfig(resBodyStr string) string {
 	/*
 	 * data is embedded in a javascript object
