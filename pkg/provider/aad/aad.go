@@ -204,6 +204,50 @@ type startSAMLResponse struct {
 	FTrimChromeBssoURL bool   `json:"fTrimChromeBssoUrl"`
 }
 
+// Autogenerate GetCredentialType request
+// some case, some fields is not exists
+type GetCredentialTypeRequest struct {
+	Username                       string `json:"username"`
+	IsOtherIdpSupported            bool   `json:"isOtherIdpSupported"`
+	CheckPhones                    bool   `json:"checkPhones"`
+	IsRemoteNGCSupported           bool   `json:"isRemoteNGCSupported"`
+	IsCookieBannerShown            bool   `json:"isCookieBannerShown"`
+	IsFidoSupported                bool   `json:"isFidoSupported"`
+	OriginalRequest                string `json:"originalRequest"`
+	Country                        string `json:"country"`
+	Forceotclogin                  bool   `json:"forceotclogin"`
+	IsExternalFederationDisallowed bool   `json:"isExternalFederationDisallowed"`
+	IsRemoteConnectSupported       bool   `json:"isRemoteConnectSupported"`
+	FederationFlags                int    `json:"federationFlags"`
+	IsSignup                       bool   `json:"isSignup"`
+	FlowToken                      string `json:"flowToken"`
+	IsAccessPassSupported          bool   `json:"isAccessPassSupported"`
+}
+
+// Autogenerate GetCredentialType response
+// some case, some fields is not exists
+type GetCredentialTypeResponse struct {
+	Username       string `json:"Username"`
+	Display        string `json:"Display"`
+	IfExistsResult int    `json:"IfExistsResult"`
+	IsUnmanaged    bool   `json:"IsUnmanaged"`
+	ThrottleStatus int    `json:"ThrottleStatus"`
+	Credentials    struct {
+		PrefCredential        int         `json:"PrefCredential"`
+		HasPassword           bool        `json:"HasPassword"`
+		RemoteNgcParams       interface{} `json:"RemoteNgcParams"`
+		FidoParams            interface{} `json:"FidoParams"`
+		SasParams             interface{} `json:"SasParams"`
+		CertAuthParams        interface{} `json:"CertAuthParams"`
+		GoogleParams          interface{} `json:"GoogleParams"`
+		FacebookParams        interface{} `json:"FacebookParams"`
+		FederationRedirectURL string      `json:"FederationRedirectUrl"`
+	} `json:"Credentials"`
+	FlowToken          string `json:"FlowToken"`
+	IsSignupDisallowed bool   `json:"IsSignupDisallowed"`
+	APICanary          string `json:"apiCanary"`
+}
+
 // Autogenerate password login response
 // some case, some fields is not exists
 type passwordLoginResponse struct {
@@ -647,6 +691,22 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		return samlAssertion, errors.Wrap(err, "error processing ConvergedSignIn request")
 	}
 
+	loginRequestUrl := ac.fullUrl(res, startSAMLResp.URLPost)
+
+	refererUrl := res.Request.URL.String()
+
+	getCredentialTypeResponse, _, err := ac.requestGetCredentialType(refererUrl, loginDetails, startSAMLResp)
+	if err != nil {
+		return samlAssertion, errors.Wrap(err, "error processing GetCredentialType request")
+	}
+
+	federationRedirectURL := getCredentialTypeResponse.Credentials.FederationRedirectURL
+
+	if federationRedirectURL != "" {
+		// implement ADFS authentication here
+		// ideally as exeptional case joining back the default flow
+	}
+
 	// password login
 	loginValues := url.Values{}
 	loginValues.Set(startSAMLResp.SFTName, startSAMLResp.SFT)
@@ -654,7 +714,7 @@ func (ac *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	loginValues.Set("login", loginDetails.Username)
 	loginValues.Set("passwd", loginDetails.Password)
 
-	passwordLoginRequest, err := http.NewRequest("POST", ac.fullUrl(res, startSAMLResp.URLPost), strings.NewReader(loginValues.Encode()))
+	passwordLoginRequest, err := http.NewRequest("POST", loginRequestUrl, strings.NewReader(loginValues.Encode()))
 
 	if err != nil {
 		return samlAssertion, errors.Wrap(err, "error retrieving login results")
@@ -859,6 +919,50 @@ func (ac *Client) requestConvergedSignIn(url string) (startSAMLResponse, *http.R
 	}
 
 	return convergedSignInResponse, res, nil
+}
+
+func (ac *Client) requestGetCredentialType(refererUrl string, loginDetails *creds.LoginDetails, convergedSignInResponse startSAMLResponse) (GetCredentialTypeResponse, *http.Response, error) {
+	var res *http.Response
+	var getCredentialTypeResponse GetCredentialTypeResponse
+
+	reqBodyObj := GetCredentialTypeRequest{
+		Username:             loginDetails.Username,
+		IsOtherIdpSupported:  true,
+		CheckPhones:          false,
+		IsRemoteNGCSupported: false,
+		IsCookieBannerShown:  false,
+		IsFidoSupported:      false,
+		OriginalRequest:      convergedSignInResponse.SCtx,
+		FlowToken:            convergedSignInResponse.SFT,
+	}
+	reqBodyJson, err := json.Marshal(reqBodyObj)
+	if err != nil {
+		return getCredentialTypeResponse, res, errors.Wrap(err, "failed to build GetCredentialType request JSON")
+	}
+
+	req, err := http.NewRequest("POST", convergedSignInResponse.URLGetCredentialType, strings.NewReader(string(reqBodyJson)))
+	if err != nil {
+		return getCredentialTypeResponse, res, errors.Wrap(err, "error building GetCredentialType request")
+	}
+
+	req.Header.Add("canary", convergedSignInResponse.APICanary)
+	req.Header.Add("client-request-id", convergedSignInResponse.CorrelationID)
+	req.Header.Add("hpgact", fmt.Sprint(convergedSignInResponse.Hpgact))
+	req.Header.Add("hpgid", fmt.Sprint(convergedSignInResponse.Hpgid))
+	req.Header.Add("hpgrequestid", convergedSignInResponse.SessionID)
+	req.Header.Add("Referer", refererUrl)
+
+	res, err = ac.client.Do(req)
+	if err != nil {
+		return getCredentialTypeResponse, res, errors.Wrap(err, "error retrieving GetCredentialType results")
+	}
+
+	err = json.NewDecoder(res.Body).Decode(&getCredentialTypeResponse)
+	if err != nil {
+		return getCredentialTypeResponse, res, errors.Wrap(err, "error decoding GetCredentialType results")
+	}
+
+	return getCredentialTypeResponse, res, nil
 }
 
 func (ac *Client) reProcess(resBodyStr string) (*http.Response, error) {
